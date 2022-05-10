@@ -8075,15 +8075,6 @@ async function checkRequirements(device, androidInfo) {
         }
     }
 }
-async function tryReboot(device, target, onReconnect) {
-    try {
-        await device.reboot(target, false);
-    }
-    catch (e) {
-        /* Failed = device rebooted by itself */
-    }
-    await device.waitForConnect(onReconnect);
-}
 async function flashZip(device, blob, wipe, onReconnect, onProgress = (_action, _item, _progress) => { }) {
     onProgress("load", "package", 0.0);
     let reader = new ZipReader(new BlobReader(blob));
@@ -8092,39 +8083,22 @@ async function flashZip(device, blob, wipe, onReconnect, onProgress = (_action, 
     if ((await device.getVariable("is-userspace")) === "yes") {
         await device.reboot("bootloader", true, onReconnect);
     }
-    // 1. Bootloader pack
-    await tryFlashImages(device, entries, onProgress, ["bootloader"]);
-    await runWithTimedProgress(onProgress, "reboot", "device", BOOTLOADER_REBOOT_TIME, tryReboot(device, "bootloader", onReconnect));
-    // 2. Radio pack
-    await tryFlashImages(device, entries, onProgress, ["radio"]);
-    await runWithTimedProgress(onProgress, "reboot", "device", BOOTLOADER_REBOOT_TIME, tryReboot(device, "bootloader", onReconnect));
     // Cancel snapshot update if in progress
     let snapshotStatus = await device.getVariable("snapshot-update-status");
     if (snapshotStatus !== null && snapshotStatus !== "none") {
         await device.runCommand("snapshot-update:cancel");
     }
-    // Load nested images for the following steps
-    logDebug("Loading nested images from zip");
-    onProgress("unpack", "images", 0.0);
-    let entry = entries.find((e) => e.filename.match(/image-.+\.zip$/));
-    let imagesBlob = await zipGetData(entry, new BlobWriter("application/zip"), {
-        onprogress: (bytes, len) => {
-            onProgress("unpack", "images", bytes / len);
-        },
-    });
-    let imageReader = new ZipReader(new BlobReader(imagesBlob));
-    let imageEntries = await imageReader.getEntries();
-    // 3. Check requirements
-    entry = imageEntries.find((e) => e.filename === "android-info.txt");
+    // 1. Check requirements
+    let entry = entries.find((e) => e.filename === "android-info.txt");
     if (entry !== undefined) {
         let reqText = await zipGetData(entry, new TextWriter());
         await checkRequirements(device, reqText);
     }
-    // 4. Boot-critical images
-    await tryFlashImages(device, imageEntries, onProgress, BOOT_CRITICAL_IMAGES);
-    // 5. Super partition template
+    // 2. Boot-critical images
+    await tryFlashImages(device, entries, onProgress, BOOT_CRITICAL_IMAGES);
+    // 3. Super partition template
     // This is also where we reboot to fastbootd.
-    entry = imageEntries.find((e) => e.filename === "super_empty.img");
+    entry = entries.find((e) => e.filename === "super_empty.img");
     if (entry !== undefined) {
         await runWithTimedProgress(onProgress, "reboot", "device", FASTBOOTD_REBOOT_TIME, device.reboot("fastboot", true, onReconnect));
         let superName = await device.getVariable("super-partition-name");
@@ -8139,8 +8113,8 @@ async function flashZip(device, blob, wipe, onReconnect, onProgress = (_action, 
         });
         await device.runCommand(`update-super:${superName}${wipe ? ":wipe" : ""}`);
     }
-    // 6. Remaining system images
-    await tryFlashImages(device, imageEntries, onProgress, SYSTEM_IMAGES);
+    // 4. Remaining system images
+    await tryFlashImages(device, entries, onProgress, SYSTEM_IMAGES);
     // We unconditionally reboot back to the bootloader here if we're in fastbootd,
     // even when there's no custom AVB key, because common follow-up actions like
     // locking the bootloader and wiping data need to be done in the bootloader.
